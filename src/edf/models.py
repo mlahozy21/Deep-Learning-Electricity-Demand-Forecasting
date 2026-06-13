@@ -16,6 +16,30 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
+def _check_feature_columns(feature_names_in, X):
+    """Assert that ``X``'s columns match the columns seen at fit time.
+
+    Predictions are made on a positional feature matrix, so train and test must
+    share the *same feature columns in the same order*. A silent positional
+    mismatch (different column order, a dropped/extra feature) would corrupt
+    every prediction without error, so we check by name when names are available.
+    """
+    if feature_names_in is None or not isinstance(X, pd.DataFrame):
+        return
+    got = list(X.columns)
+    if got != feature_names_in:
+        missing = [c for c in feature_names_in if c not in got]
+        extra = [c for c in got if c not in feature_names_in]
+        raise ValueError(
+            "Feature columns at predict time do not match those seen at fit "
+            "time (by name and order).\n"
+            f"  expected ({len(feature_names_in)}): {feature_names_in}\n"
+            f"  got      ({len(got)}): {got}\n"
+            f"  missing: {missing}\n  unexpected: {extra}\n"
+            f"  order mismatch only: {sorted(got) == sorted(feature_names_in)}"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Baseline: seasonal climatology
 # --------------------------------------------------------------------------- #
@@ -63,12 +87,22 @@ def masked_sum_rmse(pred, target, mask):
     This is the metric the challenge optimises (and the loss used in the
     original project), generalised with a mask so series with missing values
     (the métropoles) contribute only where ground truth exists.
+
+    A column with **zero** valid entries (e.g. a series entirely missing in a
+    mini-batch) has an undefined RMSE; it is excluded from the sum rather than
+    contributing a spurious 0 (which would deflate the loss / score). The
+    ``counts`` clamp only guards the division for already-excluded columns.
     """
     import torch
 
     se = (pred - target) ** 2 * mask
-    counts = torch.clamp(mask.sum(dim=0), min=1.0)
+    col_counts = mask.sum(dim=0)
+    counts = torch.clamp(col_counts, min=1.0)
     rmse_per_col = torch.sqrt(se.sum(dim=0) / counts)
+    # Drop columns with no valid points from the sum (their RMSE is undefined).
+    rmse_per_col = torch.where(
+        col_counts > 0, rmse_per_col, torch.zeros_like(rmse_per_col)
+    )
     return rmse_per_col.sum()
 
 
@@ -118,6 +152,9 @@ class TorchMLP:
         set_seed(self.seed)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.columns_ = list(y_train.columns)
+        self.feature_names_in_ = (
+            list(X_train.columns) if isinstance(X_train, pd.DataFrame) else None
+        )
 
         self.x_scaler = StandardScaler().fit(np.asarray(X_train, dtype=np.float32))
         # NaN-aware target stats: the network predicts in standardised output
@@ -175,6 +212,7 @@ class TorchMLP:
     def predict(self, X):
         import torch
 
+        _check_feature_columns(getattr(self, "feature_names_in_", None), X)
         self.net.eval()
         Xs = torch.tensor(self.x_scaler.transform(np.asarray(X, dtype=np.float32)),
                           dtype=torch.float32).to(self.device)
@@ -204,6 +242,9 @@ class GBMModel:
         from sklearn.ensemble import HistGradientBoostingRegressor
 
         self.columns_ = list(y_train.columns)
+        self.feature_names_in_ = (
+            list(X_train.columns) if isinstance(X_train, pd.DataFrame) else None
+        )
         Xa = np.asarray(X_train, dtype=np.float32)
 
         def _fit_one(col):
@@ -219,6 +260,7 @@ class GBMModel:
         return self
 
     def predict(self, X):
+        _check_feature_columns(getattr(self, "feature_names_in_", None), X)
         Xa = np.asarray(X, dtype=np.float32)
         out = {col: self.models_[col].predict(Xa) for col in self.columns_}
         idx = X.index if isinstance(X, pd.DataFrame) else None

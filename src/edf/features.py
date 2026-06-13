@@ -58,6 +58,15 @@ def weather_features(weather_aligned: pd.DataFrame) -> pd.DataFrame:
         df[f"cdd_{area}"] = (t - CDD_BASE).clip(lower=0)
 
     # Thermal inertia: rolling means of the national temperature (48 = 24 h).
+    #
+    # NOTE on the train/val boundary: this rolling window is computed over the
+    # full timeline, so the first val-year rows average in the last train-year
+    # temperatures. This is NOT target leakage. The rolling means are built
+    # purely from *exogenous* weather (an external feed that is fully available
+    # for the future 2022 horizon at prediction time), never from past values of
+    # the targets. The challenge provides weather for the test period precisely
+    # so such weather-derived features can be used; nothing about the targets
+    # crosses the boundary.
     t_fr = df["t_France"]
     df["t_France_roll24h"] = t_fr.rolling(48, min_periods=1).mean()
     df["t_France_roll48h"] = t_fr.rolling(96, min_periods=1).mean()
