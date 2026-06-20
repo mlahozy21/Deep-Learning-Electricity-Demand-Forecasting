@@ -46,4 +46,21 @@ def test_predict_rejects_reordered_feature_columns():
         model.predict(X_swapped)
     X_renamed = X.rename(columns={"hour_sin": "wrong_name"})
     with pytest.raises(ValueError):
-        model.predict(X
+        model.predict(X_renamed)
+
+
+def test_gbm_masks_per_column_nans():
+    """Each GBM regressor must train only on the rows where *its own* target is
+    present (métropoles start partway through). A column that is NaN for the
+    first half of the rows must still be fit (on its valid rows) and predict
+    finite values, never crash or train on NaN targets."""
+    X, y = _synthetic(n=400, n_targets=3)
+    # Make target t1 missing for the first half of the timeline.
+    y = y.copy()
+    y.iloc[: len(y) // 2, y.columns.get_loc("t1")] = np.nan
+    model = GBMModel(max_iter=20).fit(X, y)
+    pred = model.predict(X)
+    assert pred.shape == y.shape
+    assert np.isfinite(pred.to_numpy()).all()
+    # The masked column was fit on roughly its non-NaN rows only.
+    assert pred["t1"].notna().all()
